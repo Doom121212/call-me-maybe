@@ -7,7 +7,7 @@ negative infinity, so the model can only ever pick a valid continuation.
 
 import json
 import re
-from typing import Callable, Dict, List, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -35,6 +35,7 @@ class TokenSets(BaseModel):
     quote_ids: List[int]
     free_ids: List[int]
     escaped_ids: List[int]
+    open_ids: List[int]
 
 
 def mask_logits(
@@ -100,6 +101,25 @@ def scan_token(text: str, pending: bool) -> Tuple[bool, int, bool]:
     return True, -1, pending
 
 
+def opening_body(text: str) -> Optional[str]:
+    """Return what follows the opening quote of a string-opening token.
+
+    After ``"key":`` a string value starts with ``"`` or ``' "'``; the token
+    may carry the first characters of the value too (``' "/'``).
+
+    Args:
+        text: Decoded text of a token.
+
+    Returns:
+        The text after the quote, or None if the token opens no string.
+    """
+    if text.startswith(' "'):
+        return text[2:]
+    if text.startswith('"'):
+        return text[1:]
+    return None
+
+
 def _has_unusable_char(text: str) -> bool:
     """Tell whether a token holds control or partial-UTF-8 characters."""
     return any(ord(c) < 32 or c == "�" for c in text)
@@ -121,6 +141,7 @@ def precompute_token_sets(id_to_token: Dict[int, str]) -> TokenSets:
     quote_ids: List[int] = []
     free_ids: List[int] = []
     escaped_ids: List[int] = []
+    open_ids: List[int] = []
 
     for tid, text in id_to_token.items():
         if not text:
@@ -141,6 +162,9 @@ def precompute_token_sets(id_to_token: Dict[int, str]) -> TokenSets:
             free_ids.append(tid)
         if scan_token(text, True)[0]:
             escaped_ids.append(tid)
+        body = opening_body(text)
+        if body is not None and scan_token(body, False)[0]:
+            open_ids.append(tid)
 
     return TokenSets(
         id_to_token=id_to_token,
@@ -152,6 +176,7 @@ def precompute_token_sets(id_to_token: Dict[int, str]) -> TokenSets:
         quote_ids=quote_ids,
         free_ids=free_ids,
         escaped_ids=escaped_ids,
+        open_ids=open_ids,
     )
 
 
@@ -289,16 +314,19 @@ def generate_string(
     sets: TokenSets,
     max_tokens: int = 150,
 ) -> str:
-    """Generate the body of a JSON string up to its closing quote.
+    """Generate a JSON string, opening quote included, up to its end.
 
+    The first token must open the string (``"`` or ``' "'``) and may already
+    hold the first characters of the value, the way the tokenizer splits
+    natural text (``' "/'`` + ``home``). Forcing the quote as a separate
+    token would leave the model at a boundary it never sees in training.
     The model writes JSON, so escapes such as ``\\\\d`` are allowed but only
     the escapes JSON defines. A token containing the closing quote ends the
     string; whatever follows the quote inside that token is dropped.
 
     Args:
         get_logits: Function returning next-token logits for token ids.
-        input_ids: Token ids of the context, ending right after the
-            opening quote.
+        input_ids: Token ids of the context, ending right after the colon.
         sets: Pre-computed token sets.
         max_tokens: Safety limit on the number of generated tokens.
 
@@ -310,10 +338,15 @@ def generate_string(
     ids = list(input_ids)
     closed = False
 
-    for _ in range(max_tokens):
-        valid = sets.escaped_ids if pending else sets.free_ids
+    for step in range(max_tokens):
+        if step == 0:
+            valid = sets.open_ids
+        else:
+            valid = sets.escaped_ids if pending else sets.free_ids
         token_id = select_token(mask_logits(get_logits(ids), valid))
         text = sets.id_to_token[token_id]
+        if step == 0:
+            text = opening_body(text) or ""
         _, end, pending = scan_token(text, pending)
         if end >= 0:
             raw += text[:end]

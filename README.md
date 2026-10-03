@@ -1,4 +1,4 @@
-*This project has been created as part of the 42 curriculum by rarayano.*
+*This project has been created as part of the 42 curriculum by rarayano, ayasser.*
 
 # Call Me Maybe — Function Calling with Constrained Decoding
 
@@ -46,8 +46,28 @@ uv run python -m src \
   --output data/output/function_calls.json
 ```
 
+The default output path is the one given in the subject
+(`data/output/function_calls.json`); any other name, such as
+`data/output/function_calling_results.json`, can be chosen with `--output`.
+The output directory is created if needed.
+
 Prompts the model cannot process are reported on stderr and skipped, so the
 output file never contains an invalid entry.
+
+Grading with the moulinette (from its own directory):
+
+```bash
+uv sync
+uv run python -m moulinette prepare_exercises --set private
+# from the project directory:
+uv run python -m src \
+  --functions_definition ../moulinette/data/input/functions_definition.json \
+  --input ../moulinette/data/input/function_calling_tests.json \
+  --output data/output/function_calling_results.json
+# back in the moulinette directory:
+uv run python -m moulinette grade_student_answers --set private \
+  --student_answer_path ../call-me-maybe/data/output/function_calling_results.json
+```
 
 ## Algorithm explanation
 
@@ -69,24 +89,34 @@ program; the model fills in the function name and each value:
    plus the token is still a prefix of `-?digits(.digits)?`. The value can be
    ended (by `,` or `}`) only when it is a complete number. `integer` types
    forbid the decimal part. Values are returned as `float` / `int`.
-3. **Strings** (`generate_string`): the model writes the JSON string body.
-   Tokens with control characters are masked, and a small state machine
-   (`scan_token`) only accepts the escapes JSON defines (`\"`, `\\`, `\n`,
-   ...). A token that contains the closing quote ends the string, and
-   whatever follows the quote inside that token is dropped. The result is
-   decoded with `json.loads`, so a regex like `\d+` is generated as `\\d+` and
-   stored correctly.
+3. **Strings** (`generate_string`): the context ends at the colon and the
+   first token must open the string (`"` or ` "`, set `open_ids`). That
+   token may already carry the first characters of the value (` "/` for
+   `/home/...`), which is how the tokenizer splits natural text ("token
+   healing"). Tokens with control characters are masked, and a small state
+   machine (`scan_token`) only accepts the escapes JSON defines (`\"`,
+   `\\`, `\n`, ...). A token that contains the closing quote ends the
+   string, and whatever follows the quote inside that token is dropped. The
+   result is decoded with `json.loads`, so a regex like `\d+` is generated
+   as `\\d+` and stored correctly.
 4. **Booleans** use `generate_choice` over `true` / `false`.
 5. Each parameter is generated with the previously generated values already
    in the context (re-serialised with `json.dumps`, so quotes and
    backslashes are escaped properly).
 
-The prompt (`build_prompt`) uses Qwen's chat format (thinking disabled). It
-lists the functions with their parameter types and descriptions, gives
-general extraction rules, and shows one example with a made-up function.
-Generation is split in two stages: the function is chosen from the full list,
-then the arguments are generated with a prompt that lists only the chosen
-function, which keeps the context (and so every forward pass) shorter.
+The prompt (`build_prompt`) uses Qwen's chat format (thinking disabled) and
+lists the functions with their parameter types and descriptions.
+Generation is split in two stages, each with its own system message:
+
+- **Choosing the function** (`NAME_PROMPT`): every function is listed, so
+  this prompt only states the task, to stay short.
+- **Generating the arguments** (`ARGS_PROMPT`): only the chosen function is
+  listed, which leaves room for general extraction rules (copy text exactly,
+  keep inner quotes as `\"`, regex escapes and character classes, write a
+  named symbol as the symbol) and one example with a made-up function.
+
+Short contexts matter because every generated token costs a full forward
+pass over the whole context.
 
 ## Design decisions
 
@@ -117,15 +147,16 @@ function, which keeps the context (and so every forward pass) shorter.
 - **Speed**: the SDK exposes no KV cache, so each generated token costs one
   full forward pass over the whole context. Run time is therefore driven by
   prompt length times the number of generated tokens, which is why the
-  argument prompt only lists the chosen function. The program prints the
-  model loading time, the time and number of model calls for each prompt,
-  and the total. Measured on my machine with the sample files: model
-  ready in 7.4s, 11 prompts processed in 128.8s (99 model calls, about
-  1.3s each). Short prompts need 4–8 calls; the three-string regex prompts
-  need 12–21.
-- **Measured accuracy** on the sample files: 11/11 correct function
-  selections and 10/11 fully correct calls (the vowel prompt gets `aeiou`
-  instead of `[aeiou]` and the word `asterisk` instead of `*`).
+  argument prompt only lists the chosen function, and only includes the text
+  rules when the function takes a string. The program prints the model
+  loading time, the time and number of model calls for each prompt, and the
+  total. Measured on a laptop CPU (i5-13420H, no GPU): model ready in
+  13–22s, public set 11 prompts in about 136s (116 model calls), private
+  set 11 prompts in about 151s (139 calls), about 1.1s per call. Short
+  prompts need 5–10 calls; the three-string regex prompts need 13–24.
+- **Measured accuracy**: 11/11 on the public set and 11/11 on the private
+  set, as graded by the moulinette (correct function, argument types and
+  exact values).
 - **Known limitations**: tokens that contain partial UTF-8 sequences (e.g.
   some emoji split across tokens) are not allowed inside strings; `array`,
   `object` and `null` parameter types are not supported.
@@ -148,6 +179,22 @@ function, which keeps the context (and so every forward pass) shorter.
   `fn_get_square_root`. The name is now generated from the opening quote.
 - **Tokenisation**: vocabulary entries are byte-level BPE strings (`Ġ` for a
   space), so they are decoded to real text before being compared.
+- **Leading slash lost in paths**: with the opening quote written by the
+  program, "Read the file at /home/user/data.json" gave `" /home/..."` (the
+  model copied the ` /` token from the request), and masking leading spaces
+  then gave `"home/..."`. Printing the top logits showed `home` and ` /`
+  almost tied: the context ended at a token boundary the model never sees
+  (`"` is normally merged with what follows, as in ` "/`). The string is now
+  opened by the model itself (token healing) and the path comes out right.
+- **Inner double quotes**: `Say "hello" to {name}` came back as
+  `Say 'hello' to {name}`; the model avoided writing `\"`. A rule and an
+  example value containing escaped quotes fixed it.
+- **Category words in regex prompts**: "replace all vowels with asterisks"
+  gave the regex `aeiou` and the replacement `asterisk`. Rules about
+  character classes and named symbols, plus an example with an analogous
+  request (punctuation marks and a star, not the test itself), fixed it. An
+  earlier example using "odd digits" made the model write `[0-9]` instead of
+  `\d+` for "numbers", so every prompt change was re-checked on both sets.
 
 ## Testing strategy
 
@@ -163,7 +210,11 @@ function, which keeps the context (and so every forward pass) shorter.
 
 End to end, run `make run` and check that `data/output/function_calls.json`
 parses, that each `name` exists in the definitions and that argument types
-match. Try edge cases: empty strings, large numbers, quotes and backslashes
+match. The moulinette (see Instructions) then grades both exercise sets:
+it calls the real functions with the generated arguments, so it also checks
+types (`2.0` for a `number`, `4` for an `integer`) and the exact strings.
+Every change to the prompt or the decoder was validated on both sets,
+because a fix for one prompt can break another. Try edge cases: empty strings, large numbers, quotes and backslashes
 in prompts, ambiguous prompts, and other function files.
 
 ## Example usage
@@ -203,5 +254,9 @@ Error: file not found: missing.json
 
 **AI usage**: an AI assistant was used to review the first version of the
 code, find the string-decoding bugs described above, and draft the
-refactoring, the unit tests and this README. I read and tested the result
-and can explain every part of it.
+refactoring, the unit tests and this README. A later AI-assisted session
+(Claude) ran the moulinette on both exercise sets, inspected the model's
+top logits to diagnose the path, inner-quote and vowel failures, and
+implemented the string token healing, the per-stage system prompts and the
+matching unit tests. I read and tested the result and can explain every
+part of it.

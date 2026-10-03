@@ -5,11 +5,11 @@ requires-python = ">=3.10"
 dependencies = ["numpy", "pydantic", "llm_sdk", "accelerate"]
 
 [tool.uv.sources]
-llm_sdk = { path = "llm_sdk/llm_sdk", editable = true}
+llm_sdk = { path = "llm_sdk", editable = true}
 
 [tool.mypy]
 exclude = '''(^|/)(\.venv|llm_sdk|data)/'''
-mypy_path = "llm_sdk/llm_sdk"
+mypy_path = "llm_sdk"
 
 [dependency-groups]
 dev = [

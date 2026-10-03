@@ -1,4 +1,4 @@
-﻿"""Turns one natural language prompt into one function call."""
+"""Turns one natural language prompt into one function call."""
 
 import json
 from typing import Any, Callable, Dict, List
@@ -15,33 +15,49 @@ from src.models import FunctionDefinition, ParameterDef
 
 Encode = Callable[[str], List[int]]
 
-SYSTEM_PROMPT = (
+# Stage 1 (choosing the function) only needs the task; the extraction rules
+# are left out because this prompt lists every function and is the longest.
+NAME_PROMPT = (
     "You convert a request into one function call written as JSON: "
-    '{"name": ..., "parameters": {...}}. Never answer the request itself.\n'
-    "Rules:\n"
+    '{"name": ..., "parameters": {...}}. Never answer the request itself.'
+)
+
+# Stage 2 (arguments) lists only the chosen function, so the rules fit.
+ARGS_PROMPT = (
+    NAME_PROMPT + "\nRules:\n"
     "- Copy text values exactly from the request, without surrounding "
-    "quotes.\n"
+    "quotes. Double quotes inside a value are kept and written \\\".\n"
     "- Numbers are plain numbers from the request.\n"
-    "- Regular expressions use JSON escapes (\\\\d+ for numbers) and "
-    "character classes such as [xyz] for any of several characters.\n"
-    "- A replacement is the literal text to insert (- for a dash), never "
-    "its name.\n"
+    "- Regular expressions use JSON escapes (\\\\d+ for numbers). A group "
+    "of characters (letters, vowels...) is a character class in brackets "
+    "listing them all, such as [xyz].\n"
+    "- A replacement is the literal text to insert. When the request "
+    "names a symbol, write the symbol itself (dash: -, plus: +, star: *).\n"
     "Example (made-up function):\n"
-    "Request: Replace the letters x and y in 'xy1' with a dash\n"
-    '{"name": "fn_example", "parameters": {"text": "xy1", '
-    '"pattern": "[xy]", "replacement": "-"}}'
+    "Request: Replace the punctuation marks in 'say \"hi!\", ok?' with a "
+    "star\n"
+    '{"name": "fn_example", "parameters": {"text": "say \\"hi!\\", ok?", '
+    '"pattern": "[.,!?]", "replacement": "*"}}'
+)
+
+# Stage 2 for a function without string parameters: the text rules and the
+# example would only lengthen every forward pass.
+NUMBERS_PROMPT = (
+    NAME_PROMPT + "\nNumbers are plain numbers copied from the request."
 )
 
 
 def build_prompt(
     user_prompt: str,
-    functions: List[FunctionDefinition]
+    functions: List[FunctionDefinition],
+    system: str = ARGS_PROMPT,
 ) -> str:
     """Build the chat-formatted prompt that precedes the generated JSON.
 
     Args:
         user_prompt: The natural language request.
         functions: The functions the model may choose from.
+        system: The system message (``NAME_PROMPT`` or ``ARGS_PROMPT``).
 
     Returns:
         The prompt text given to the model (Qwen chat format, no thinking).
@@ -54,7 +70,7 @@ def build_prompt(
         lines.append(f"- {fn.name}({params}): {fn.description}")
     user = "Functions:\n" + "\n".join(lines) + f"\nRequest: {user_prompt}"
     return (
-        f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+        f"<|im_start|>system\n{system}<|im_end|>\n"
         f"<|im_start|>user\n{user}<|im_end|>\n"
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
     )
@@ -65,7 +81,6 @@ def build_context(
     function_name: str,
     done: Dict[str, Any],
     next_param: str,
-    next_is_string: bool,
 ) -> str:
     """Build the text ending right where the next value starts.
 
@@ -74,24 +89,23 @@ def build_context(
         function_name: Name of the chosen function.
         done: Parameters generated so far.
         next_param: Name of the parameter about to be generated.
-        next_is_string: Whether the next value opens with a quote.
 
     Returns:
-        The context to feed to the model.
+        The context to feed to the model, ending with the colon.
     """
     parts = [
         f"{json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}"
         for k, v in done.items()
     ]
-    # Numbers and booleans start right after the colon: the model writes the
-    # space together with the value (" -" for a negative number).
+    # Every value starts right after the colon: the model writes the space
+    # (and the opening quote of a string) together with the first characters
+    # of the value, as in natural text (" -" or ' "/').
     parts.append(f"{json.dumps(next_param)}:")
-    text = (
+    return (
         prompt_text
         + '{"name": ' + json.dumps(function_name)
         + ', "parameters": {' + ", ".join(parts)
     )
-    return text + ' "' if next_is_string else text
 
 
 def generate_value(
@@ -153,18 +167,20 @@ def process_prompt(
     # The name is generated right after the opening quote. Forcing part of
     # it (e.g. "fn_") would split it at an unnatural token boundary and
     # mislead the model.
-    ids = encode(build_prompt(user_prompt, functions) + '{"name": "')
+    ids = encode(
+        build_prompt(user_prompt, functions, NAME_PROMPT) + '{"name": "'
+    )
     name = generate_choice(get_logits, ids, names, sets, sets.quote_ids)
     chosen = next(fn for fn in functions if fn.name == name)
 
-    # Shorter prompt for the arguments: only the chosen function is listed.
-    prompt_text = build_prompt(user_prompt, [chosen])
+    # Shorter prompt for the arguments: only the chosen function is listed,
+    # and the text rules only when it takes a string.
+    has_string = any(p.type == "string" for p in chosen.parameters.values())
+    system = ARGS_PROMPT if has_string else NUMBERS_PROMPT
+    prompt_text = build_prompt(user_prompt, [chosen], system)
     params: Dict[str, Any] = {}
     for param_name, param_def in chosen.parameters.items():
-        context = build_context(
-            prompt_text, chosen.name, params, param_name,
-            param_def.type == "string",
-        )
+        context = build_context(prompt_text, chosen.name, params, param_name)
         params[param_name] = generate_value(
             get_logits, encode(context), param_def, sets
         )

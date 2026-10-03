@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 
-from src.generator import build_context, build_prompt
+from src.generator import NUMBERS_PROMPT, build_context, build_prompt
 from src.io_utils import (
     load_functions,
     load_prompts,
@@ -80,16 +80,22 @@ class IoTests(unittest.TestCase):
         self.assertIn("Request: Greet bob<|im_end|>", text)
         self.assertTrue(text.endswith("</think>\n\n"))
 
+    def test_prompt_uses_the_given_system_message(self) -> None:
+        fn = FunctionDefinition.model_validate(FUNCTION)
+        text = build_prompt("Greet bob", [fn], NUMBERS_PROMPT)
+        self.assertIn(NUMBERS_PROMPT, text)
+        self.assertNotIn("Regular expressions", text)
+        self.assertIn("Regular expressions", build_prompt("Greet bob", [fn]))
+
     def test_context_escapes_previous_values(self) -> None:
-        context = build_context("P\n", "fn", {"a": 1.0, "b": 'x"\\y'}, "c",
-                                True)
+        context = build_context("P\n", "fn", {"a": 1.0, "b": 'x"\\y'}, "c")
         self.assertTrue(context.endswith(
             '{"name": "fn", "parameters": {"a": 1.0, "b": "x\\"\\\\y", '
-            '"c": "'
+            '"c":'
         ))
 
-    def test_number_context_ends_at_colon(self) -> None:
-        context = build_context("P\n", "fn", {}, "a", False)
+    def test_context_ends_at_colon(self) -> None:
+        context = build_context("P\n", "fn", {}, "a")
         self.assertTrue(context.endswith('"parameters": {"a":'))
 
 

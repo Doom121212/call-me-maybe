@@ -19,7 +19,7 @@ VOCAB: Dict[int, str] = {
     0: "1", 1: "2", 2: ".", 3: "-", 4: ",", 5: "}", 6: '"', 7: '",',
     8: "a", 9: "\\", 10: "d", 11: "n", 12: "fn", 13: "_add",
     14: "_numbers", 15: "_greet", 16: "true", 17: "false", 18: "\n",
-    19: "hello", 20: "\\\\", 21: " -", 22: " ",
+    19: "hello", 20: "\\\\", 21: " -", 22: " ", 23: ' "', 24: ' "/',
 }
 BASE = 3
 
@@ -105,21 +105,37 @@ class DecoderTests(unittest.TestCase):
             parse_number("-", False)
 
     def test_string_stops_at_closing_quote_token(self) -> None:
-        text = generate_string(scripted([19, 8, 7, 8]), [0, 0, 0], self.sets)
+        text = generate_string(scripted([23, 19, 8, 7, 8]), [0, 0, 0],
+                               self.sets)
         self.assertEqual(text, "helloa")
 
     def test_string_handles_json_escapes(self) -> None:
-        text = generate_string(scripted([8, 9, 9, 10, 6]), [0, 0, 0],
+        text = generate_string(scripted([23, 8, 9, 9, 10, 6]), [0, 0, 0],
                                self.sets)
         self.assertEqual(text, "a\\d")
 
     def test_empty_string(self) -> None:
-        text = generate_string(scripted([6]), [0, 0, 0], self.sets)
+        text = generate_string(scripted([23, 6]), [0, 0, 0], self.sets)
         self.assertEqual(text, "")
 
+    def test_string_must_open_with_a_quote(self) -> None:
+        self.assertIn(23, self.sets.open_ids)
+        self.assertNotIn(19, self.sets.open_ids)
+        text = generate_string(scripted([19, 8, 6]), [0, 0, 0], self.sets)
+        self.assertEqual(text, "a")
+
+    def test_opening_token_may_carry_text(self) -> None:
+        text = generate_string(scripted([24, 8, 6]), [0, 0, 0], self.sets)
+        self.assertEqual(text, "/a")
+
+    def test_string_keeps_inner_spaces(self) -> None:
+        text = generate_string(scripted([23, 8, 22, 8, 6]), [0, 0, 0],
+                               self.sets)
+        self.assertEqual(text, "a a")
+
     def test_string_dangling_backslash_is_dropped(self) -> None:
-        text = generate_string(scripted([8, 9]), [0, 0, 0], self.sets,
-                               max_tokens=2)
+        text = generate_string(scripted([23, 8, 9]), [0, 0, 0], self.sets,
+                               max_tokens=3)
         self.assertEqual(text, "a")
 
     def test_choice_picks_allowed_name(self) -> None:
